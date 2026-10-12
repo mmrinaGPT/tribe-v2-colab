@@ -6,9 +6,12 @@ from pathlib import Path
 import tempfile
 import types
 import unittest
+import contextlib
+import io
 from unittest.mock import patch
 
 import pandas as pd
+import numpy as np
 
 NOTEBOOK = Path(__file__).resolve().parents[1] / 'TRIBE_v2_WhisperX_fix.ipynb'
 
@@ -99,6 +102,40 @@ class NotebookTests(unittest.TestCase):
         source = ''.join(self.nb['cells'][4]['source'])
         with self.assertRaisesRegex(RuntimeError, 'Restart the session'):
             exec(source, {'_TRIBE_RESTART_REQUIRED': True})
+
+    def _audio_prediction_env(self, fail=False):
+        data = types.SimpleNamespace(features_to_use=['text', 'audio', 'video'],
+                                     num_workers=20, batch_size=8)
+        def predict(events):
+            self.assertEqual(data.features_to_use, ['audio'])
+            self.assertEqual(events.type.tolist(), ['Audio'])
+            self.assertEqual(data.num_workers, 0)
+            if fail:
+                raise RuntimeError('inference failed')
+            return np.ones((2, 3), dtype=np.float32), [object(), object()]
+        model = types.SimpleNamespace(data=data, predict=predict)
+        env = dict(model=model, np=np, CACHE_FOLDER=Path(self.tmp.name),
+                   df=pd.DataFrame({'type': ['Audio', 'Word'], 'duration': [1., 1.]}))
+        return model, env
+
+    def test_audio_prediction_excludes_words_and_restores_settings(self):
+        model, env = self._audio_prediction_env()
+        with contextlib.redirect_stdout(io.StringIO()):
+            exec(''.join(self.nb['cells'][9]['source']), env)
+        self.assertEqual(model.data.features_to_use, ['text', 'audio', 'video'])
+        self.assertEqual(model.data.num_workers, 20)
+        self.assertEqual(model.data.batch_size, 8)
+        saved = np.load(Path(self.tmp.name) / 'audio_only_brain_activity.npy', allow_pickle=False)
+        self.assertEqual(saved.shape, (2, 3))
+
+    def test_audio_prediction_failure_restores_settings(self):
+        model, env = self._audio_prediction_env(fail=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(RuntimeError, 'inference failed'):
+                exec(''.join(self.nb['cells'][9]['source']), env)
+        self.assertEqual(model.data.features_to_use, ['text', 'audio', 'video'])
+        self.assertEqual(model.data.num_workers, 20)
+        self.assertEqual(model.data.batch_size, 8)
 
 if __name__ == '__main__':
     unittest.main()
